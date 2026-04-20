@@ -117,12 +117,41 @@ The emotional tone is **lunar and ethereal** — a quiet space that feels like t
 
 ### 4.1 Dream Entry (Core)
 
-**Voice Recording**
-- Tap the center mic button → immediately starts recording
-- Waveform visualization during recording (animated bars)
-- Tap again to stop → auto-transcribes + saves audio locally
-- Audio stored as `.m4a` files in app documents directory
-- If transcription fails, audio is saved with a "tap to transcribe" prompt
+**Voice Entry Pipeline (3-stage)**
+
+The voice entry flow is a guided pipeline that transforms raw speech into a polished dream record:
+
+1. **Stage 1 — Speech-to-Text (STT)**
+   - Tap the center mic button → immediately starts recording
+   - Waveform visualization during recording (animated bars)
+   - Tap again to stop → audio sent to **OpenAI Whisper API** for transcription
+   - Whisper returns raw transcribed text (may contain filler words, false starts, repetition)
+   - Audio stored as `.m4a` locally alongside the text
+
+2. **Stage 2 — LLM Text Refinement**
+   - Raw transcription passed to **GPT-4o-mini** for cleanup
+   - Small, fast model removes: filler words ("um", "uh", "like", "you know"), false starts, repeated phrases
+   - Fixes obvious grammar issues while preserving the user's voice and meaning
+   - Does NOT add interpretation or embellish — purely subtractive cleanup
+   - Returns cleaned text in < 2 seconds typically
+
+3. **Stage 3 — User Review & Edit**
+   - Cleaned text presented in an editable text area
+   - User can review, correct errors, add missing details
+   - Side-by-side view toggle: raw transcription vs cleaned text
+   - Emotion picker below: 8 emotions (Joy, Sadness, Fear, Anger, Surprise, Confusion, Calm, Anxiety)
+   - Tags input: comma-separated, autocomplete from existing tags
+   - Lucidity toggle: "Was this a lucid dream?"
+   - Nightmare toggle: "Was this a nightmare?"
+   - Optional title field (auto-generated from first 6 words if empty)
+   - Tap "Save" to persist the dream record
+
+**"Save Raw" Quick Save Button**
+- Every page in the voice entry flow has a persistent **"Save Raw"** button (secondary, less prominent)
+- Tapping it skips all refinement stages and saves the raw transcription directly as a dream record
+- Available on: recording review, refinement, and edit screens
+- Useful when the user is in a hurry or the raw text is already good enough
+- Metadata (emotions, tags, lucidity) can still be added after saving via the Dream Detail screen
 
 **Text Entry**
 - Large, borderless textarea — placeholder: *"What did you dream about?"*
@@ -137,13 +166,17 @@ The emotional tone is **lunar and ethereal** — a quiet space that feels like t
 **Quick Entry Flow**
 1. User wakes → opens app → sees Tonight screen
 2. Taps prominent mic button → enters voice recording immediately
-3. After recording stops → transcribed text appears → user can edit
-4. Taps "Interpret" → AI analysis generates → shown on Dream Detail screen
+3. After recording stops → Whisper transcribes → GPT-4o-mini refines → editable text appears
+4. User reviews/edits → taps Save → dream record created
+5. Optional: tap "Save Raw" at any stage to skip refinement and save immediately
+6. Taps "Interpret" → AI analysis generates → shown on Dream Detail screen
 
 **States**
 - Empty (no dreams today): Illustrated empty state with moon graphic
 - Recording: Full-screen recording UI with waveform
-- Editing: Text input with emotion/tags/lucidity pickers
+- Transcribing: Spinner with "Transcribing..." label (Stage 1)
+- Refining: Subtle "Cleaning up text..." indicator (Stage 2, usually < 2s)
+- Editing: Text input with emotion/tags/lucidity pickers (Stage 3)
 - Saving: Brief spinner → redirects to Dream Detail
 
 ### 4.2 AI Dream Interpretation
@@ -283,10 +316,11 @@ The emotional tone is **lunar and ethereal** — a quiet space that feels like t
 - Tappable in filter mode
 
 ### VoiceRecorder
-- States: idle (mic button), recording (waveform + stop button), processing (spinner)
+- States: idle (mic button), recording (waveform + stop button), transcribing (spinner + "Transcribing..."), refining (subtle "Cleaning up text..."), reviewing (editable text)
 - Waveform: 20 animated bars, heights vary by audio level
 - Recording duration counter
 - Cancel button (X) to discard
+- "Save Raw" button (persistent across all states) — skips refinement, saves raw transcription
 
 ### InterpretationCard
 - Expandable card sections
@@ -590,7 +624,7 @@ The **voice-first entry** is the primary differentiator. Nobody in this space ha
 
 ## 10. Open Questions
 
-1. **Transcription provider:** Use OpenAI Whisper API (accurate, cheap) or a free alternative?
+1. **~~Transcription provider~~:** Resolved — OpenAI Whisper API (accurate, cheap at $0.006/min, already in tech stack)
 2. **Cloud backend:** Supabase vs Firebase vs custom Node.js? Supabase is developer-friendly and has good RN support.
 3. **Dream Wall moderation:** How to prevent abuse without real moderation overhead?
 4. **AI prompt tuning:** Need user testing to calibrate interpretation depth vs token cost.

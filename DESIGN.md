@@ -55,7 +55,7 @@ The app functions entirely offline-first, storing dreams locally via AsyncStorag
 | Icons | lucide-react-native | 0.468 | SVG line icons |
 | Date utils | date-fns | 4.0 | Date parsing + formatting |
 | UUID | uuid | 11.0 | ID generation |
-| AI | OpenAI SDK (future) | — | Phase 2 |
+| AI | OpenAI SDK | — | Whisper STT + GPT-4o-mini refinement + GPT-4o interpretation |
 
 ### Dev Dependencies
 
@@ -98,7 +98,8 @@ DreamBound/
 │   │   ├── storage.ts            # AsyncStorage wrapper + file system helpers
 │   │   ├── ai.ts                 # OpenAI integration layer (real API)
 │   │   ├── mockAi.ts             # Mock AI for development (returns realistic data)
-│   │   ├── audio.ts              # expo-av recording/playback wrapper
+│   │   ├── audio.ts              # expo-av recording/playback + Whisper transcription
+│   │   ├── refineText.ts         # GPT-4o-mini text refinement (remove fillers)
 │   │   └── dreamEngine.ts        # Core business logic: CRUD, analysis, insights
 │   ├── store/
 │   │   ├── dreamStore.ts         # Zustand store: dreams state + CRUD
@@ -278,7 +279,7 @@ Generates realistic but deterministic dream interpretations for development. Use
 
 Does NOT call any external API. Response structure exactly mirrors the real `Interpretation` interface.
 
-### 5.4 `audio.ts` — Audio Recording
+### 5.4 `audio.ts` — Audio Recording & Transcription
 
 Wraps `expo-av` Recording and Sound APIs:
 
@@ -289,7 +290,7 @@ Wraps `expo-av` Recording and Sound APIs:
 | `cancelRecording()` | Stops and deletes the temp file |
 | `getRecordingStatus()` | Returns current duration and metering data |
 | `playAudio(uri)` | Plays back a saved recording |
-| `transcribeAudio(uri)` | **[PLACEHOLDER]** — Whisper API integration |
+| `transcribeAudio(uri)` | Sends audio to OpenAI Whisper API (`POST /v1/audio/transcriptions`), returns raw text |
 
 **Audio files** are stored in `FileSystem.documentDirectory + 'audio/'` as `.m4a` files. The filename is `dream_<timestamp>.m4a`.
 
@@ -299,7 +300,41 @@ Wraps `expo-av` Recording and Sound APIs:
 - Bit rate: 128 kbps
 - Max duration: 300 seconds (5 minutes)
 
-### 5.5 `storage.ts` — Persistence
+**Whisper transcription:**
+- Model: `whisper-1`
+- Response format: `json` (returns `{text: string}`)
+- Language: auto-detect (defaults to user's device language)
+- File size limit: 25 MB (well above our 5-min .m4a at ~4 MB)
+- Error handling: retry once on 429/500, fall back to raw save prompt on persistent failure
+- Cost: $0.006 per minute of audio
+
+### 5.5 `refineText.ts` — LLM Text Refinement
+
+Cleans raw transcription text by removing filler words, false starts, and repetitive phrases. Uses GPT-4o-mini for fast, cheap processing.
+
+| Function | Description |
+|----------|-------------|
+| `refineTranscription(rawText, apiKey?)` | Sends raw text to GPT-4o-mini, returns cleaned text |
+
+**Refinement prompt rules:**
+- Remove filler words: "um", "uh", "like", "you know", "I mean", "sort of", "kind of"
+- Remove false starts and repeated phrases
+- Fix obvious grammar issues
+- Preserve the user's voice, word choices, and meaning
+- Do NOT add content, interpret, or embellish
+- Do NOT change the emotional tone
+- Keep it natural — don't over-formalize casual speech
+
+**Implementation:**
+- Single Chat Completions call, ~100-200 tokens in, ~100-200 tokens out
+- Temperature: 0 (deterministic cleanup)
+- Max tokens: 500
+- Timeout: 10 seconds (hard fail → return raw text)
+- Cost: negligible (~$0.0001 per refinement)
+
+**Fallback:** If the API call fails or times out, return the raw transcription unchanged. The user can always edit manually in Stage 3.
+
+### 5.6 `storage.ts` — Persistence
 
 Wraps AsyncStorage with typed operations:
 
@@ -506,24 +541,50 @@ The `interpretDream` action in `dreamStore` calls `useUserStore`'s `useInterpret
 
 ### 9.5 New Dream Modal (`/(modals)/new-dream.tsx`)
 
-**Purpose:** Capture a dream immediately upon waking.
+**Purpose:** Capture a dream immediately upon waking. Supports a 3-stage voice pipeline and direct text entry.
 
-**Recording flow:**
+**Voice Recording Pipeline (3 stages):**
+
+*Stage 1 — Recording + Transcription:*
 1. Large mic button → starts recording immediately (full-screen recording UI with waveform)
-2. Tap stop → audio saved, returns to text input
-3. Audio preview shown with delete option
+2. Tap stop → audio saved locally
+3. Show "Transcribing..." spinner while Whisper API processes audio (~2-5s)
+4. Raw transcription text returned
 
-**Entry flow:**
+*Stage 2 — Text Refinement:*
+5. Show "Cleaning up text..." indicator while GPT-4o-mini refines (~1-2s)
+6. Cleaned text returned (filler words removed, grammar fixed)
+
+*Stage 3 — Review & Edit:*
+7. Editable text area pre-filled with cleaned text
+8. Toggle button: "Show raw transcription" / "Show cleaned text" (side-by-side)
+9. Emotion picker: 8 emotions in wrap layout, tap to select (max 3)
+10. Tags input: comma-separated text
+11. Lucid toggle + Nightmare toggle (mutually exclusive presentation)
+12. Title field (optional, auto-generated from first 6 words if empty)
+13. "Save" button → validates non-empty → creates dream
+
+**"Save Raw" button** (persistent across all stages):
+- Located in the header or as a secondary button alongside the primary action
+- On Stage 1 (after transcription): saves raw text immediately, skips refinement
+- On Stage 2 (during/after refinement): saves raw text, cancels refinement
+- On Stage 3 (review): saves whatever text is currently in the editor
+- After saving raw, user can still edit the dream via Dream Detail screen
+
+**Direct Text Entry:**
 1. Text area (large, borderless) with placeholder "What did you dream about?"
-2. Emotion picker: 8 emotions in wrap layout, tap to select (max 3)
-3. Tags input: comma-separated text
-4. Lucid toggle + Nightmare toggle (mutually exclusive presentation)
-5. Save button → validates non-empty → creates dream → optional auto-interpret
+2. Emotion picker, tags, lucid/nightmare toggles (same as Stage 3)
+3. "Save" button → validates non-empty → creates dream
 
 **Validation:**
 - `content` must be non-empty
 - Emotions capped at 3
 - Tags capped at 10
+
+**Error Handling:**
+- Whisper API failure → show "Transcription failed" message, allow manual text entry or retry
+- Refinement failure → silently fall back to raw text, proceed to Stage 3
+- No network → disable voice pipeline, show text-only entry with "Voice requires internet" notice
 
 ### 9.6 Dream Detail Modal (`/dream/[id].tsx`)
 
@@ -565,6 +626,22 @@ Currently a minimal implementation. The full-screen interpretation view is rende
 ### 10.1 Architecture
 
 ```
+Voice Entry Pipeline:
+audio.stopRecording() → {uri, duration}
+    ↓
+audio.transcribeAudio(uri)
+    ↓
+POST /v1/audio/transcriptions (whisper-1)
+    ↓
+raw text
+    ↓
+refineText.refineTranscription(rawText)
+    ↓
+POST /v1/chat/completions (gpt-4o-mini, temp=0)
+    ↓
+cleaned text → user reviews/edits → saveDream()
+
+Interpretation Pipeline:
 dreamStore.interpretDream(id)
     ↓
 dreamEngine.runInterpretation(dream, useMock, model, apiKey)
@@ -572,10 +649,15 @@ dreamEngine.runInterpretation(dream, useMock, model, apiKey)
     ├── useMock=true  → mockAi.generateMockInterpretation()
     └── useMock=false → ai.callOpenAI(dream, model, apiKey)
                             ↓
-                        POST /v1/chat/completions
+                        POST /v1/chat/completions (gpt-4o)
                             ↓
                         parseInterpretationResponse()
 ```
+
+**API usage summary (single voice dream entry):**
+- Whisper API: ~1 min audio = $0.006
+- GPT-4o-mini refinement: ~200 tokens = ~$0.00003
+- Total per voice entry: ~$0.006 (dominated by Whisper)
 
 ### 10.2 Prompt Design
 
@@ -598,9 +680,21 @@ The mock service (`mockAi.ts`) generates interpretations that:
 - Vary responses using seeded randomness so repeated calls differ slightly
 - Match the exact `Interpretation` interface structure
 
-### 10.5 Transcription — [PLACEHOLDER]
+### 10.5 Transcription & Refinement
 
-`audio.transcribeAudio()` currently returns `{text: '', confidence: 0}`. In Phase 2, this will call OpenAI Whisper API to convert voice recordings to text automatically.
+**Transcription (`audio.transcribeAudio()`):**
+- Calls OpenAI Whisper API (`POST /v1/audio/transcriptions`)
+- Model: `whisper-1`, response format: `json`
+- Sends `.m4a` audio file as `multipart/form-data`
+- Returns `{text: string}` with raw transcription
+- Auto-detects language from audio
+
+**Refinement (`refineText.refineTranscription()`):**
+- Calls OpenAI Chat Completions API (`POST /v1/chat/completions`)
+- Model: `gpt-4o-mini`, temperature: 0, max_tokens: 500
+- System prompt instructs: subtractive cleanup only (remove fillers, fix grammar, preserve voice)
+- Returns cleaned text string
+- On failure: returns raw text unchanged (user can edit manually)
 
 ---
 
@@ -652,6 +746,9 @@ Declared in `app.json` → `ios.infoPlist`:
 - [x] Zustand state management
 - [x] Bottom tab navigation
 - [x] Full-screen dream entry modal
+- [x] **Whisper API transcription** — audio → text via OpenAI Whisper
+- [x] **LLM text refinement** — GPT-4o-mini removes filler words from transcription
+- [x] **"Save Raw" quick save button** — skip refinement, save raw transcription directly
 - [ ] **Inline editing of dreams** — [PLACEHOLDER]
 - [ ] **Full-text search** — search UI exists, not wired to engine
 - [ ] **Emotion picker redesign** — needs better UX in new-dream modal
@@ -660,7 +757,6 @@ Declared in `app.json` → `ios.infoPlist`:
 - [ ] User accounts (email/password + OAuth: Google, Apple)
 - [ ] Supabase backend (PostgreSQL + Auth + Realtime)
 - [ ] Real OpenAI interpretation (GPT-4o / GPT-4o-mini)
-- [ ] OpenAI Whisper transcription
 - [ ] Cloud sync across devices
 - [ ] Interpretation credits system (3 free/month, premium unlimited)
 - [ ] Secure API key storage (expo-secure-store)
@@ -744,8 +840,6 @@ EAS JSON config (`eas.json`) is pending creation in Phase 2.
 ## 14. Known Issues & Open Questions
 
 1. **Audio file cleanup on dream delete**: Not yet implemented. Orphaned audio files accumulate.
-
-2. **Transcription**: `transcribeAudio()` returns empty. User must manually type content after voice recording.
 
 3. **Full-text search**: The journal screen has a search bar, but it doesn't yet filter results from `getFilteredDreams()`. The search text is captured in state but not applied.
 
