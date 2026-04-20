@@ -74,7 +74,7 @@ export const REFINEMENT_CONFIG = {
   providers: {
     openrouter: {
       baseUrl: 'https://openrouter.ai/api/v1',
-      model: 'xiaomi/mimo-v2-flash',
+      model: 'qwen/qwen-2.5-7b-instruct',
     },
     groq: {
       baseUrl: 'https://api.groq.com/openai/v1',
