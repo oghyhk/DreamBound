@@ -3,6 +3,7 @@
 // ============================================================
 
 import type { UserPreferences, Emotion } from '../types';
+import { SECRETS } from './secrets';
 
 // Storage keys
 export const STORAGE_KEYS = {
@@ -41,9 +42,15 @@ export const AI_CONFIG = {
   },
 } as const;
 
+// API Keys (from local secrets.ts, not committed to git)
+export const API_KEYS = {
+  groq: SECRETS.groqApiKey,
+  openrouter: SECRETS.openrouterApiKey,
+} as const;
+
 // Speech-to-Text Configuration (Groq Whisper)
 export const STT_CONFIG = {
-  // Groq API (default) — OpenAI-compatible, 3.2× cheaper than OpenAI
+  // Groq API (default) — OpenAI-compatible, 3.2x cheaper than OpenAI
   defaultProvider: 'groq' as const,
   providers: {
     groq: {
@@ -61,14 +68,17 @@ export const STT_CONFIG = {
   timeoutMs: 30_000,
 } as const;
 
-// Text Refinement Configuration
+// Text Refinement Configuration (OpenRouter mimo-v2-flash)
 export const REFINEMENT_CONFIG = {
-  // OpenAI-compatible API (same key as STT, different endpoint)
-  defaultProvider: 'groq' as const,
+  defaultProvider: 'openrouter' as const,
   providers: {
+    openrouter: {
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'xiaomi/mimo-v2-flash',
+    },
     groq: {
       baseUrl: 'https://api.groq.com/openai/v1',
-      model: 'llama-3.1-8b-instant', // Fast, cheap LLM for refinement
+      model: 'llama-3.1-8b-instant',
     },
     openai: {
       baseUrl: 'https://api.openai.com/v1',

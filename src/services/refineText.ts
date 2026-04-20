@@ -82,13 +82,21 @@ async function callRefinementAPI(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000); // 10s hard timeout
 
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${apiKey}`,
+  };
+
+  // OpenRouter requires HTTP-Referer header
+  if (apiBaseUrl.includes('openrouter.ai')) {
+    headers['HTTP-Referer'] = 'https://dreambound.app';
+    headers['X-Title'] = 'DreamBound';
+  }
+
   try {
     const response = await fetch(`${apiBaseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers,
       body: JSON.stringify({
         model,
         messages: [

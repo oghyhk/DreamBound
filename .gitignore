@@ -35,6 +35,9 @@ yarn-error.*
 .env.test.local
 .env.production.local
 
+# Secrets (API keys)
+src/constants/secrets.ts
+
 # Testing
 coverage/
 

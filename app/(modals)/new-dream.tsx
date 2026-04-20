@@ -40,7 +40,7 @@ import {
 import { refineTranscription } from '../../src/services/refineText';
 import { colors, spacing, borderRadius, typography } from '../../src/constants/theme';
 import { formatDuration } from '../../src/utils/helpers';
-import { STT_CONFIG, REFINEMENT_CONFIG } from '../../src/constants/config';
+import { STT_CONFIG, REFINEMENT_CONFIG, API_KEYS } from '../../src/constants/config';
 import {
   EMOTION_CONFIG,
   type Emotion,
@@ -145,10 +145,9 @@ export default function NewDreamScreen() {
     const sttProvider = STT_CONFIG.providers[STT_CONFIG.defaultProvider];
 
     const result = await transcribeAudio(uri, {
-      apiKey: undefined, // TODO: wire up when user provides API key
+      apiKey: API_KEYS.groq,
       apiBaseUrl: sttProvider.baseUrl,
       model: sttProvider.model,
-      useMock: !undefined, // mock until API key is provided
     });
 
     if (!result.success || !result.text) {
@@ -175,10 +174,9 @@ export default function NewDreamScreen() {
     const refineProvider = REFINEMENT_CONFIG.providers[REFINEMENT_CONFIG.defaultProvider];
 
     const result = await refineTranscription(rawText, {
-      apiKey: undefined, // TODO: wire up when user provides API key
+      apiKey: API_KEYS.openrouter,
       apiBaseUrl: refineProvider.baseUrl,
       model: refineProvider.model,
-      useMock: !undefined, // mock until API key is provided
     });
 
     setRefinedText(result.cleanedText);
