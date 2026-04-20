@@ -230,19 +230,102 @@ export function generateAudioFilename(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Transcription Placeholder
+// Transcription (Groq Whisper API / OpenAI-compatible)
 // ---------------------------------------------------------------------------
 
+export interface TranscriptionResult {
+  text: string;
+  success: boolean;
+  error?: string;
+}
+
+/**
+ * Transcribe audio file using Groq Whisper API (or any OpenAI-compatible endpoint).
+ *
+ * - In mock mode (no API key): returns a placeholder prompt for the user
+ * - In real mode: sends .m4a to Whisper API and returns transcribed text
+ *
+ * Groq endpoint: https://api.groq.com/openai/v1/audio/transcriptions
+ * OpenAI endpoint: https://api.openai.com/v1/audio/transcriptions
+ */
 export async function transcribeAudio(
-  _uri: string,
-): Promise<{ text: string; confidence: number }> {
-  // PLACEHOLDER: Real implementation would use OpenAI Whisper API
-  // or a similar speech-to-text service.
-  //
-  // For now, returns a placeholder that prompts the user to
-  // manually type their dream if transcription fails.
-  return {
-    text: '',
-    confidence: 0,
-  };
+  uri: string,
+  options?: {
+    apiKey?: string;
+    apiBaseUrl?: string;
+    model?: string;
+    language?: string;
+    useMock?: boolean;
+  },
+): Promise<TranscriptionResult> {
+  const useMock = options?.useMock ?? !options?.apiKey;
+
+  // Mock mode: return placeholder
+  if (useMock) {
+    return {
+      text: '',
+      success: false,
+      error: 'No API key — transcription unavailable',
+    };
+  }
+
+  try {
+    // Build multipart form data
+    const formData = new FormData();
+
+    // Append the audio file
+    const fileInfo = {
+      uri,
+      type: 'audio/m4a',
+      name: uri.split('/').pop() ?? 'recording.m4a',
+    } as any;
+    formData.append('file', fileInfo);
+    formData.append('model', options?.model ?? 'whisper-large-v3');
+
+    if (options?.language) {
+      formData.append('language', options.language);
+    }
+
+    formData.append('response_format', 'json');
+
+    // Call the transcription API
+    const baseUrl = options?.apiBaseUrl ?? 'https://api.groq.com/openai/v1';
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000); // 30s timeout for transcription
+
+    try {
+      const response = await fetch(`${baseUrl}/audio/transcriptions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${options!.apiKey!}`,
+          // Don't set Content-Type — fetch sets it automatically for FormData
+        },
+        body: formData,
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        throw new Error(`Transcription API error ${response.status}: ${errText}`);
+      }
+
+      const data = await response.json();
+      const text = data.text?.trim();
+
+      if (!text) {
+        throw new Error('Empty transcription result');
+      }
+
+      return { text, success: true };
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (err: any) {
+    console.warn('[audio] Transcription failed:', err.message);
+    return {
+      text: '',
+      success: false,
+      error: err.message ?? 'Transcription failed',
+    };
+  }
 }

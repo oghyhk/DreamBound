@@ -204,3 +204,22 @@ export type TabParamList = {
   insights: undefined;
   profile: undefined;
 };
+
+// --- Voice Pipeline Types ---
+
+export type VoicePipelineStage =
+  | 'idle'          // No recording, show mic button
+  | 'recording'     // Actively recording audio
+  | 'transcribing'  // Sending audio to STT API
+  | 'refining'      // Cleaning up raw transcription with LLM
+  | 'reviewing'     // User reviewing/editing final text
+  | 'error';        // Something failed
+
+export interface VoicePipelineState {
+  stage: VoicePipelineStage;
+  audioUri: string | null;
+  audioDuration: number;       // seconds
+  rawTranscription: string;    // from Whisper
+  refinedText: string;         // from LLM cleanup
+  error: string | null;
+}

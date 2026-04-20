@@ -41,6 +41,46 @@ export const AI_CONFIG = {
   },
 } as const;
 
+// Speech-to-Text Configuration (Groq Whisper)
+export const STT_CONFIG = {
+  // Groq API (default) — OpenAI-compatible, 3.2× cheaper than OpenAI
+  defaultProvider: 'groq' as const,
+  providers: {
+    groq: {
+      baseUrl: 'https://api.groq.com/openai/v1',
+      model: 'whisper-large-v3',
+      costPerMinute: 0.00185, // USD
+    },
+    openai: {
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'whisper-1',
+      costPerMinute: 0.006,
+    },
+  },
+  // Request settings
+  timeoutMs: 30_000,
+} as const;
+
+// Text Refinement Configuration
+export const REFINEMENT_CONFIG = {
+  // OpenAI-compatible API (same key as STT, different endpoint)
+  defaultProvider: 'groq' as const,
+  providers: {
+    groq: {
+      baseUrl: 'https://api.groq.com/openai/v1',
+      model: 'llama-3.1-8b-instant', // Fast, cheap LLM for refinement
+    },
+    openai: {
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-4o-mini',
+    },
+  },
+  // Request settings
+  temperature: 0,
+  maxTokens: 500,
+  timeoutMs: 10_000,
+} as const;
+
 // Audio Recording Configuration
 export const AUDIO_CONFIG = {
   maxRecordingDurationSeconds: 300, // 5 minutes

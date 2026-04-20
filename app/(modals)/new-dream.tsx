@@ -1,6 +1,7 @@
 // ============================================================
 // DreamBound — New Dream Entry Modal
-// Voice + text dream recording and capture
+// 3-stage voice pipeline: Record → Transcribe → Refine → Review
+// Plus direct text entry and Save Raw quick save
 // ============================================================
 
 import {
@@ -12,6 +13,7 @@ import {
   ScrollView,
   SafeAreaView,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -21,23 +23,51 @@ import {
   X,
   ChevronDown,
   ChevronUp,
-  Sparkles,
   Trash2,
+  Save,
+  Eye,
+  EyeOff,
 } from 'lucide-react-native';
 import { useDreamStore } from '../../src/store/dreamStore';
 import { useUserStore } from '../../src/store/userStore';
-import { startRecording, stopRecording, getRecordingStatus, cancelRecording } from '../../src/services/audio';
-import { colors, spacing, borderRadius, typography, shadows } from '../../src/constants/theme';
+import {
+  startRecording,
+  stopRecording,
+  getRecordingStatus,
+  cancelRecording,
+  transcribeAudio,
+} from '../../src/services/audio';
+import { refineTranscription } from '../../src/services/refineText';
+import { colors, spacing, borderRadius, typography } from '../../src/constants/theme';
 import { formatDuration } from '../../src/utils/helpers';
-import { EMOTION_CONFIG, type Emotion, EMOTION_LIST } from '../../src/types';
+import { STT_CONFIG, REFINEMENT_CONFIG } from '../../src/constants/config';
+import {
+  EMOTION_CONFIG,
+  type Emotion,
+  EMOTION_LIST,
+  type VoicePipelineStage,
+} from '../../src/types';
 
 export default function NewDreamScreen() {
   const router = useRouter();
-  const [content, setContent] = useState('');
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingDuration, setRecordingDuration] = useState(0);
+
+  // Voice pipeline state
+  const [stage, setStage] = useState<VoicePipelineStage>('idle');
   const [audioUri, setAudioUri] = useState<string | null>(null);
   const [audioDuration, setAudioDuration] = useState(0);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const [rawTranscription, setRawTranscription] = useState('');
+  const [refinedText, setRefinedText] = useState('');
+  const [pipelineError, setPipelineError] = useState<string | null>(null);
+
+  // Text entry mode (when user skips voice)
+  const [textMode, setTextMode] = useState(false);
+
+  // Review state
+  const [showRaw, setShowRaw] = useState(false);
+
+  // Dream metadata
+  const [content, setContent] = useState('');
   const [selectedEmotions, setSelectedEmotions] = useState<Emotion[]>([]);
   const [tags, setTags] = useState('');
   const [isLucid, setIsLucid] = useState(false);
@@ -51,11 +81,13 @@ export default function NewDreamScreen() {
   const preferences = useUserStore((s) => s.preferences);
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const autoSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ---------------------------------------------------------------------------
   // Recording timer
+  // ---------------------------------------------------------------------------
+
   useEffect(() => {
-    if (isRecording) {
+    if (stage === 'recording') {
       timerRef.current = setInterval(() => {
         setRecordingDuration((d) => d + 1);
       }, 1000);
@@ -65,13 +97,18 @@ export default function NewDreamScreen() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [isRecording]);
+  }, [stage]);
+
+  // ---------------------------------------------------------------------------
+  // Voice Pipeline: Stage 1 — Record
+  // ---------------------------------------------------------------------------
 
   const handleStartRecording = async () => {
     try {
       await startRecording();
-      setIsRecording(true);
+      setStage('recording');
       setRecordingDuration(0);
+      setPipelineError(null);
     } catch (err) {
       Alert.alert('Recording Failed', 'Could not start recording. Please check microphone permissions.');
     }
@@ -80,32 +117,125 @@ export default function NewDreamScreen() {
   const handleStopRecording = async () => {
     try {
       const result = await stopRecording();
-      setIsRecording(false);
       setAudioUri(result.uri);
       setAudioDuration(result.duration);
-      // In a real app, we'd auto-transcribe here
-      // For now, user types the content
+      // Proceed to transcription
+      await runTranscription(result.uri);
     } catch (err) {
-      setIsRecording(false);
+      setStage('error');
+      setPipelineError('Could not save recording.');
       Alert.alert('Recording Failed', 'Could not save recording.');
     }
   };
 
   const handleCancelRecording = async () => {
     await cancelRecording();
-    setIsRecording(false);
+    setStage('idle');
     setRecordingDuration(0);
   };
 
-  const handleToggleEmotion = (emotion: Emotion) => {
-    setSelectedEmotions((prev) =>
-      prev.includes(emotion)
-        ? prev.filter((e) => e !== emotion)
-        : prev.length < 3
-        ? [...prev, emotion]
-        : prev,
-    );
+  // ---------------------------------------------------------------------------
+  // Voice Pipeline: Stage 2 — Transcribe
+  // ---------------------------------------------------------------------------
+
+  const runTranscription = async (uri: string) => {
+    setStage('transcribing');
+    setPipelineError(null);
+
+    const sttProvider = STT_CONFIG.providers[STT_CONFIG.defaultProvider];
+
+    const result = await transcribeAudio(uri, {
+      apiKey: undefined, // TODO: wire up when user provides API key
+      apiBaseUrl: sttProvider.baseUrl,
+      model: sttProvider.model,
+      useMock: !undefined, // mock until API key is provided
+    });
+
+    if (!result.success || !result.text) {
+      // Transcription failed — go to review with empty text (user can type)
+      setRawTranscription('');
+      setRefinedText('');
+      setStage('reviewing');
+      setPipelineError(result.error ?? 'Transcription failed. Please type your dream.');
+      return;
+    }
+
+    setRawTranscription(result.text);
+    // Proceed to refinement
+    await runRefinement(result.text);
   };
+
+  // ---------------------------------------------------------------------------
+  // Voice Pipeline: Stage 3 — Refine
+  // ---------------------------------------------------------------------------
+
+  const runRefinement = async (rawText: string) => {
+    setStage('refining');
+
+    const refineProvider = REFINEMENT_CONFIG.providers[REFINEMENT_CONFIG.defaultProvider];
+
+    const result = await refineTranscription(rawText, {
+      apiKey: undefined, // TODO: wire up when user provides API key
+      apiBaseUrl: refineProvider.baseUrl,
+      model: refineProvider.model,
+      useMock: !undefined, // mock until API key is provided
+    });
+
+    setRefinedText(result.cleanedText);
+    setContent(result.cleanedText);
+    setStage('reviewing');
+
+    if (!result.success) {
+      setPipelineError(result.error ?? 'Refinement failed. Showing raw transcription.');
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Save Raw — skip refinement, save raw transcription immediately
+  // ---------------------------------------------------------------------------
+
+  const handleSaveRaw = async () => {
+    const textToSave = rawTranscription || content;
+    if (!textToSave.trim()) {
+      Alert.alert('Empty Dream', 'No transcription to save.');
+      return;
+    }
+
+    setIsSaving(true);
+
+    const tagList = tags
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    const dream = addDream({
+      content: textToSave.trim(),
+      audioUri: audioUri ?? undefined,
+      audioDuration: audioDuration || undefined,
+      emotions: selectedEmotions,
+      tags: tagList,
+      isLucid,
+      isNightmare,
+    });
+
+    // Auto-interpret if user has credits
+    const hasCredit = useCredit();
+    if (hasCredit) {
+      await interpretDream(
+        dream.id,
+        preferences.useMockAI,
+        preferences.aiModel,
+        undefined,
+      );
+    }
+
+    setIsSaving(false);
+    router.back();
+  };
+
+  // ---------------------------------------------------------------------------
+  // Save (after review/edit)
+  // ---------------------------------------------------------------------------
 
   const handleSave = async () => {
     if (!content.trim()) {
@@ -137,13 +267,17 @@ export default function NewDreamScreen() {
         dream.id,
         preferences.useMockAI,
         preferences.aiModel,
-        undefined, // API key would come from secure storage in production
+        undefined,
       );
     }
 
     setIsSaving(false);
     router.back();
   };
+
+  // ---------------------------------------------------------------------------
+  // Discard
+  // ---------------------------------------------------------------------------
 
   const handleDiscard = () => {
     if (content.trim() || audioUri) {
@@ -152,8 +286,14 @@ export default function NewDreamScreen() {
         {
           text: 'Discard',
           style: 'destructive',
-          onPress: () => {
-            if (audioUri) cancelRecording();
+          onPress: async () => {
+            if (stage === 'recording') await cancelRecording();
+            if (audioUri) {
+              try {
+                const { deleteRecording } = await import('../../src/services/audio');
+                await deleteRecording(audioUri);
+              } catch {}
+            }
             router.back();
           },
         },
@@ -163,7 +303,61 @@ export default function NewDreamScreen() {
     }
   };
 
-  if (isRecording) {
+  // ---------------------------------------------------------------------------
+  // Emotion handling
+  // ---------------------------------------------------------------------------
+
+  const handleToggleEmotion = (emotion: Emotion) => {
+    setSelectedEmotions((prev) =>
+      prev.includes(emotion)
+        ? prev.filter((e) => e !== emotion)
+        : prev.length < 3
+        ? [...prev, emotion]
+        : prev,
+    );
+  };
+
+  // ---------------------------------------------------------------------------
+  // Switch to text-only mode
+  // ---------------------------------------------------------------------------
+
+  const handleTextMode = () => {
+    setTextMode(true);
+    setStage('reviewing');
+  };
+
+  // ---------------------------------------------------------------------------
+  // Header (shared across all stages)
+  // ---------------------------------------------------------------------------
+
+  const renderHeader = () => (
+    <View style={styles.header}>
+      <Pressable onPress={handleDiscard}>
+        <Text style={styles.cancelText}>Cancel</Text>
+      </Pressable>
+      <Text style={styles.headerTitle}>New Dream</Text>
+      <View style={styles.headerRight}>
+        {/* Save Raw — available during reviewing stage when we have transcription */}
+        {stage === 'reviewing' && rawTranscription ? (
+          <Pressable onPress={handleSaveRaw} disabled={isSaving} style={styles.saveRawButton}>
+            <Save color={colors.accent} size={16} />
+            <Text style={styles.saveRawText}>Save Raw</Text>
+          </Pressable>
+        ) : null}
+        <Pressable onPress={handleSave} disabled={isSaving || stage !== 'reviewing'}>
+          <Text style={[styles.saveText, (isSaving || stage !== 'reviewing') && styles.saveTextDisabled]}>
+            {isSaving ? 'Saving…' : 'Save'}
+          </Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+
+  // ---------------------------------------------------------------------------
+  // Render: Recording screen (full-screen)
+  // ---------------------------------------------------------------------------
+
+  if (stage === 'recording') {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.recordingScreen}>
@@ -199,46 +393,75 @@ export default function NewDreamScreen() {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Render: Transcribing / Refining (processing overlay)
+  // ---------------------------------------------------------------------------
+
+  const isProcessing = stage === 'transcribing' || stage === 'refining';
+
+  // ---------------------------------------------------------------------------
+  // Main content
+  // ---------------------------------------------------------------------------
+
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <Pressable onPress={handleDiscard}>
-          <Text style={styles.cancelText}>Cancel</Text>
-        </Pressable>
-        <Text style={styles.headerTitle}>New Dream</Text>
-        <Pressable onPress={handleSave} disabled={isSaving}>
-          <Text style={[styles.saveText, isSaving && styles.saveTextDisabled]}>
-            {isSaving ? 'Saving…' : 'Save'}
-          </Text>
-        </Pressable>
-      </View>
+      {renderHeader()}
 
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
       >
-        {/* Voice Recording Section */}
-        {!audioUri && (
-          <Pressable
-            style={({ pressed }) => [
-              styles.recordButton,
-              pressed && styles.recordButtonPressed,
-            ]}
-            onPress={handleStartRecording}
-          >
-            <View style={styles.micCircle}>
-              <Mic color={colors.white} size={28} />
-            </View>
-            <Text style={styles.recordButtonText}>Tap to record your dream</Text>
-            <Text style={styles.recordButtonSubtext}>
-              Speak as soon as you wake up
+        {/* Processing indicator (transcribing or refining) */}
+        {isProcessing && (
+          <View style={styles.processingCard}>
+            <ActivityIndicator size="large" color={colors.primary} />
+            <Text style={styles.processingTitle}>
+              {stage === 'transcribing' ? 'Transcribing…' : 'Cleaning up text…'}
             </Text>
-          </Pressable>
+            <Text style={styles.processingSubtext}>
+              {stage === 'transcribing'
+                ? 'Converting your voice to text'
+                : 'Removing filler words'}
+            </Text>
+          </View>
         )}
 
-        {/* Audio Preview */}
-        {audioUri && (
+        {/* Voice pipeline error banner */}
+        {pipelineError && stage === 'reviewing' && (
+          <View style={styles.errorBanner}>
+            <Text style={styles.errorText}>{pipelineError}</Text>
+          </View>
+        )}
+
+        {/* Mic button — idle stage, no text mode */}
+        {stage === 'idle' && !textMode && (
+          <>
+            <Pressable
+              style={({ pressed }) => [
+                styles.recordButton,
+                pressed && styles.recordButtonPressed,
+              ]}
+              onPress={handleStartRecording}
+            >
+              <View style={styles.micCircle}>
+                <Mic color={colors.white} size={28} />
+              </View>
+              <Text style={styles.recordButtonText}>Tap to record your dream</Text>
+              <Text style={styles.recordButtonSubtext}>
+                Speak as soon as you wake up
+              </Text>
+            </Pressable>
+
+            {/* Or type instead */}
+            <Pressable style={styles.textModeButton} onPress={handleTextMode}>
+              <Text style={styles.textModeText}>Or type your dream instead</Text>
+            </Pressable>
+          </>
+        )}
+
+        {/* Audio preview (after recording) */}
+        {audioUri && stage !== 'idle' && (
           <View style={styles.audioPreview}>
             <View style={styles.audioInfo}>
               <View style={styles.audioIcon}>
@@ -254,8 +477,11 @@ export default function NewDreamScreen() {
             <Pressable
               style={styles.deleteAudioButton}
               onPress={() => {
-                cancelRecording();
                 setAudioUri(null);
+                setAudioDuration(0);
+                setRawTranscription('');
+                setRefinedText('');
+                setStage('idle');
               }}
             >
               <Trash2 color={colors.nightmare} size={16} />
@@ -263,107 +489,175 @@ export default function NewDreamScreen() {
           </View>
         )}
 
-        {/* Dream Text */}
-        <View style={styles.inputSection}>
-          <Text style={styles.inputLabel}>What did you dream about?</Text>
-          <TextInput
-            style={styles.textInput}
-            placeholder="Describe your dream in as much detail as you can remember…"
-            placeholderTextColor={colors.textMuted}
-            value={content}
-            onChangeText={setContent}
-            multiline
-            textAlignVertical="top"
-          />
-        </View>
-
-        {/* Emotions */}
-        <View style={styles.inputSection}>
-          <Pressable
-            style={styles.emotionToggle}
-            onPress={() => setShowEmotions(!showEmotions)}
-          >
-            <Text style={styles.inputLabel}>
-              Emotions {selectedEmotions.length > 0 && `(${selectedEmotions.length}/3)`}
-            </Text>
-            {showEmotions ? (
-              <ChevronUp color={colors.textMuted} size={18} />
-            ) : (
-              <ChevronDown color={colors.textMuted} size={18} />
+        {/* Review stage: show transcription text (raw or refined) */}
+        {stage === 'reviewing' && (
+          <>
+            {/* Raw / Cleaned toggle (only if we have both) */}
+            {rawTranscription && refinedText && rawTranscription !== refinedText && (
+              <Pressable style={styles.toggleRawButton} onPress={() => setShowRaw(!showRaw)}>
+                {showRaw ? (
+                  <EyeOff color={colors.textMuted} size={16} />
+                ) : (
+                  <Eye color={colors.textMuted} size={16} />
+                )}
+                <Text style={styles.toggleRawText}>
+                  {showRaw ? 'Showing raw transcription' : 'Showing cleaned text'}
+                </Text>
+              </Pressable>
             )}
-          </Pressable>
 
-          {showEmotions && (
-            <View style={styles.emotionsGrid}>
-              {EMOTION_LIST.map((emotion) => {
-                const isSelected = selectedEmotions.includes(emotion);
-                return (
-                  <Pressable
-                    key={emotion}
-                    style={[
-                      styles.emotionChip,
-                      isSelected && {
-                        backgroundColor: EMOTION_CONFIG[emotion].color + '22',
-                        borderColor: EMOTION_CONFIG[emotion].color,
-                      },
-                    ]}
-                    onPress={() => handleToggleEmotion(emotion)}
-                  >
-                    <Text
-                      style={[
-                        styles.emotionChipText,
-                        isSelected && {
-                          color: EMOTION_CONFIG[emotion].color,
-                        },
-                      ]}
-                    >
-                      {EMOTION_CONFIG[emotion].label}
-                    </Text>
-                  </Pressable>
-                );
-              })}
+            {/* Dream text input */}
+            <View style={styles.inputSection}>
+              <Text style={styles.inputLabel}>
+                {rawTranscription ? 'Your dream (edit as needed)' : 'What did you dream about?'}
+              </Text>
+              <TextInput
+                style={styles.textInput}
+                placeholder="Describe your dream in as much detail as you can remember…"
+                placeholderTextColor={colors.textMuted}
+                value={showRaw ? rawTranscription : content}
+                onChangeText={(text) => {
+                  if (!showRaw) {
+                    setContent(text);
+                  }
+                }}
+                editable={!showRaw}
+                multiline
+                textAlignVertical="top"
+              />
             </View>
-          )}
-        </View>
+          </>
+        )}
 
-        {/* Tags */}
-        <View style={styles.inputSection}>
-          <Text style={styles.inputLabel}>Tags (comma separated)</Text>
-          <TextInput
-            style={styles.tagInput}
-            placeholder="flying, water, chase…"
-            placeholderTextColor={colors.textMuted}
-            value={tags}
-            onChangeText={setTags}
-          />
-        </View>
+        {/* Text-only mode: idle but user chose to type */}
+        {stage === 'reviewing' && textMode && !rawTranscription && (
+          <View style={styles.inputSection}>
+            <Text style={styles.inputLabel}>What did you dream about?</Text>
+            <TextInput
+              style={styles.textInput}
+              placeholder="Describe your dream in as much detail as you can remember…"
+              placeholderTextColor={colors.textMuted}
+              value={content}
+              onChangeText={setContent}
+              multiline
+              textAlignVertical="top"
+            />
+          </View>
+        )}
 
-        {/* Toggles */}
-        <View style={styles.toggleSection}>
+        {/* Save Raw button (prominent, during reviewing with transcription) */}
+        {stage === 'reviewing' && rawTranscription && (
           <Pressable
-            style={[styles.toggleRow, isLucid && styles.toggleRowActive]}
-            onPress={() => setIsLucid(!isLucid)}
+            style={({ pressed }) => [
+              styles.saveRawProminentButton,
+              pressed && styles.saveRawProminentButtonPressed,
+            ]}
+            onPress={handleSaveRaw}
+            disabled={isSaving}
           >
-            <Text style={styles.toggleLabel}>Lucid Dream</Text>
-            <View style={[styles.toggleTrack, isLucid && styles.toggleTrackActive]}>
-              <View style={[styles.toggleThumb, isLucid && styles.toggleThumbActive]} />
-            </View>
+            <Save color={colors.accent} size={18} />
+            <Text style={styles.saveRawProminentText}>
+              Save Raw — skip cleanup
+            </Text>
           </Pressable>
+        )}
 
-          <Pressable
-            style={[styles.toggleRow, isNightmare && styles.toggleRowActive]}
-            onPress={() => setIsNightmare(!isNightmare)}
-          >
-            <Text style={styles.toggleLabel}>Nightmare</Text>
-            <View style={[styles.toggleTrack, isNightmare && styles.toggleTrackActiveNightmare]}>
-              <View style={[styles.toggleThumb, isNightmare && styles.toggleThumbActive]} />
+        {/* Metadata section (visible in reviewing state) */}
+        {stage === 'reviewing' && (
+          <>
+            {/* Emotions */}
+            <View style={styles.inputSection}>
+              <Pressable
+                style={styles.emotionToggle}
+                onPress={() => setShowEmotions(!showEmotions)}
+              >
+                <Text style={styles.inputLabel}>
+                  Emotions {selectedEmotions.length > 0 && `(${selectedEmotions.length}/3)`}
+                </Text>
+                {showEmotions ? (
+                  <ChevronUp color={colors.textMuted} size={18} />
+                ) : (
+                  <ChevronDown color={colors.textMuted} size={18} />
+                )}
+              </Pressable>
+
+              {showEmotions && (
+                <View style={styles.emotionsGrid}>
+                  {EMOTION_LIST.map((emotion) => {
+                    const isSelected = selectedEmotions.includes(emotion);
+                    return (
+                      <Pressable
+                        key={emotion}
+                        style={[
+                          styles.emotionChip,
+                          isSelected && {
+                            backgroundColor: EMOTION_CONFIG[emotion].color + '22',
+                            borderColor: EMOTION_CONFIG[emotion].color,
+                          },
+                        ]}
+                        onPress={() => handleToggleEmotion(emotion)}
+                      >
+                        <Text
+                          style={[
+                            styles.emotionChipText,
+                            isSelected && {
+                              color: EMOTION_CONFIG[emotion].color,
+                            },
+                          ]}
+                        >
+                          {EMOTION_CONFIG[emotion].label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              )}
             </View>
-          </Pressable>
-        </View>
+
+            {/* Tags */}
+            <View style={styles.inputSection}>
+              <Text style={styles.inputLabel}>Tags (comma separated)</Text>
+              <TextInput
+                style={styles.tagInput}
+                placeholder="flying, water, chase…"
+                placeholderTextColor={colors.textMuted}
+                value={tags}
+                onChangeText={setTags}
+              />
+            </View>
+
+            {/* Toggles */}
+            <View style={styles.toggleSection}>
+              <Pressable
+                style={[styles.toggleRow, isLucid && styles.toggleRowActive]}
+                onPress={() => setIsLucid(!isLucid)}
+              >
+                <Text style={styles.toggleLabel}>Lucid Dream</Text>
+                <View style={[styles.toggleTrack, isLucid && styles.toggleTrackActive]}>
+                  <View style={[styles.toggleThumb, isLucid && styles.toggleThumbActive]} />
+                </View>
+              </Pressable>
+
+              <Pressable
+                style={[styles.toggleRow, isNightmare && styles.toggleRowActive]}
+                onPress={() => setIsNightmare(!isNightmare)}
+              >
+                <Text style={styles.toggleLabel}>Nightmare</Text>
+                <View style={[styles.toggleTrack, isNightmare && styles.toggleTrackActiveNightmare]}>
+                  <View style={[styles.toggleThumb, isNightmare && styles.toggleThumbActive]} />
+                </View>
+              </Pressable>
+            </View>
+          </>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
   container: {
@@ -387,6 +681,25 @@ const styles = StyleSheet.create({
     ...typography.h3,
     color: colors.textPrimary,
   },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing[3],
+  },
+  saveRawButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing[1],
+    paddingHorizontal: spacing[2],
+    paddingVertical: spacing[1],
+    borderRadius: borderRadius.sm,
+    backgroundColor: colors.accent + '15',
+  },
+  saveRawText: {
+    ...typography.caption,
+    color: colors.accent,
+    fontWeight: '600',
+  },
   saveText: {
     ...typography.body,
     color: colors.primary,
@@ -401,8 +714,42 @@ const styles = StyleSheet.create({
   scrollContent: {
     padding: spacing[4],
     paddingBottom: spacing[16],
-    gap: spacing[6],
+    gap: spacing[4],
   },
+
+  // Processing states
+  processingCard: {
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing[8],
+    gap: spacing[3],
+    borderWidth: 1,
+    borderColor: colors.primary + '30',
+  },
+  processingTitle: {
+    ...typography.h3,
+    color: colors.textPrimary,
+  },
+  processingSubtext: {
+    ...typography.bodySmall,
+    color: colors.textMuted,
+  },
+
+  // Error banner
+  errorBanner: {
+    backgroundColor: colors.nightmare + '15',
+    borderRadius: borderRadius.md,
+    padding: spacing[3],
+    borderWidth: 1,
+    borderColor: colors.nightmare + '30',
+  },
+  errorText: {
+    ...typography.bodySmall,
+    color: colors.nightmare,
+  },
+
+  // Recording button (idle state)
   recordButton: {
     alignItems: 'center',
     backgroundColor: colors.surface,
@@ -433,6 +780,18 @@ const styles = StyleSheet.create({
     ...typography.bodySmall,
     color: colors.textMuted,
   },
+
+  // Text mode button
+  textModeButton: {
+    alignItems: 'center',
+    padding: spacing[3],
+  },
+  textModeText: {
+    ...typography.body,
+    color: colors.textMuted,
+  },
+
+  // Audio preview
   audioPreview: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -468,6 +827,20 @@ const styles = StyleSheet.create({
   deleteAudioButton: {
     padding: spacing[2],
   },
+
+  // Raw / Cleaned toggle
+  toggleRawButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing[2],
+    paddingVertical: spacing[2],
+  },
+  toggleRawText: {
+    ...typography.caption,
+    color: colors.textMuted,
+  },
+
+  // Input sections
   inputSection: {
     gap: spacing[2],
   },
@@ -486,6 +859,29 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
+
+  // Save Raw prominent button
+  saveRawProminentButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing[2],
+    backgroundColor: colors.accent + '15',
+    borderRadius: borderRadius.md,
+    padding: spacing[4],
+    borderWidth: 1,
+    borderColor: colors.accent + '40',
+  },
+  saveRawProminentButtonPressed: {
+    opacity: 0.7,
+  },
+  saveRawProminentText: {
+    ...typography.body,
+    color: colors.accent,
+    fontWeight: '600',
+  },
+
+  // Emotions
   emotionToggle: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -510,6 +906,8 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontWeight: '600',
   },
+
+  // Tags
   tagInput: {
     backgroundColor: colors.surface,
     borderRadius: borderRadius.md,
@@ -519,6 +917,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
+
+  // Toggles
   toggleSection: {
     backgroundColor: colors.surface,
     borderRadius: borderRadius.md,
@@ -566,6 +966,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
     alignSelf: 'flex-end',
   },
+
   // Recording screen
   recordingScreen: {
     flex: 1,
